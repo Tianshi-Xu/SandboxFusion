@@ -14,20 +14,12 @@
 
 import os
 import traceback
-<<<<<<< HEAD
-from enum import Enum
-from typing import Dict, List, Optional, Tuple
-
-import structlog
-from fastapi import APIRouter
-=======
 import uuid
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 import structlog  # type: ignore[import-not-found]
 from fastapi import APIRouter, Request
->>>>>>> rescue
 from pydantic import BaseModel, Field
 
 from sandbox.runners import (
@@ -111,15 +103,6 @@ def parse_run_status(result: CodeRunResult) -> Tuple[RunStatus, str]:
 
 
 @sandbox_router.post("/run_code", response_model=RunCodeResponse, tags=['sandbox'])
-<<<<<<< HEAD
-async def run_code(request: RunCodeRequest):
-    resp = RunCodeResponse(status=RunStatus.Success, message='', executor_pod_name=os.environ.get('MY_POD_NAME'))
-    try:
-        logger.debug(
-            f'start processing {request.language} request with code ```\n{request.code[:100]}\n``` and files {list(request.files.keys())}...(memory_limit: {request.memory_limit_MB}MB)'
-        )
-        result = await CODE_RUNNERS[request.language](CodeRunArgs(**request.model_dump()))
-=======
 async def run_code(payload: RunCodeRequest, http_request: Request):
     request_id = http_request.headers.get('x-request-id') or str(uuid.uuid4())
     req_logger = logger.bind(request_id=request_id)
@@ -135,7 +118,6 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
             files=list(payload.files.keys()),
         )
         result = await CODE_RUNNERS[payload.language](CodeRunArgs(**payload.model_dump()))
->>>>>>> rescue
 
         resp.compile_result = result.compile_result
         resp.run_result = result.run_result
@@ -143,11 +125,6 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
         resp.status, message = parse_run_status(result)
         if resp.status == RunStatus.SandboxError:
             resp.message = message
-<<<<<<< HEAD
-    except Exception as e:
-        message = f'exception on running code {request.code}: {e} {traceback.print_tb(e.__traceback__)}'
-        logger.warning(message)
-=======
         compile_status = result.compile_result.status if result.compile_result else None
         compile_duration = result.compile_result.execution_time if result.compile_result else None
         run_status = result.run_result.status if result.run_result else None
@@ -164,7 +141,6 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
     except Exception as e:
         message = f'exception on running code {payload.code}: {e} {traceback.print_tb(e.__traceback__)}'
         req_logger.warning('sandbox.run_code.exception', error=str(e))
->>>>>>> rescue
         resp.message = message
         resp.status = RunStatus.SandboxError
 
@@ -172,16 +148,6 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
 
 
 @sandbox_router.post("/run_jupyter", name='Run Code in Jupyter', response_model=RunJupyterResponse, tags=['sandbox'])
-<<<<<<< HEAD
-async def run_jupyter_handler(request: RunJupyterRequest):
-    resp = RunJupyterResponse(status=RunStatus.Success, message='', executor_pod_name=os.environ.get('MY_POD_NAME'))
-    code_repr = "\n".join(request.cells)[:100]
-    try:
-        logger.debug(
-            f'start processing jupyter request with code ```\n{code_repr}\n``` and files {list(request.files.keys())}...'
-        )
-        result = await run_jupyter(request)
-=======
 async def run_jupyter_handler(payload: RunJupyterRequest, http_request: Request):
     request_id = http_request.headers.get('x-request-id') or str(uuid.uuid4())
     req_logger = logger.bind(request_id=request_id)
@@ -194,7 +160,6 @@ async def run_jupyter_handler(payload: RunJupyterRequest, http_request: Request)
             files=list(payload.files.keys()),
         )
         result = await run_jupyter(payload)
->>>>>>> rescue
         resp.driver = result.driver
         if result.status != CommandRunStatus.Finished:
             resp.status = RunStatus.Failed
@@ -202,11 +167,6 @@ async def run_jupyter_handler(payload: RunJupyterRequest, http_request: Request)
             resp.status = RunStatus.Success
             resp.cells = result.cells
             resp.files = result.files
-<<<<<<< HEAD
-    except Exception as e:
-        message = f'exception on running jupyter {code_repr}: {e} {traceback.print_tb(e.__traceback__)}'
-        logger.warning(message)
-=======
         req_logger.info(
             'sandbox.run_jupyter.finish',
             status=resp.status,
@@ -215,7 +175,6 @@ async def run_jupyter_handler(payload: RunJupyterRequest, http_request: Request)
     except Exception as e:
         message = f'exception on running jupyter {code_repr}: {e} {traceback.print_tb(e.__traceback__)}'
         req_logger.warning('sandbox.run_jupyter.exception', error=str(e))
->>>>>>> rescue
         resp.message = message
         resp.status = RunStatus.SandboxError
 
