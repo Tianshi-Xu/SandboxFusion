@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import os
+import time
 import traceback
+import uuid
 from contextlib import asynccontextmanager
 
-import structlog
+import structlog  # type: ignore[import-not-found]
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +50,44 @@ app = FastAPI(lifespan=lifespan)
 app.mount('/SandboxFusion',
           StaticFiles(directory=os.path.abspath(os.path.join(__file__, '../../../docs/build')), html=True),
           name='doc-site')
+
+
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    start = time.perf_counter()
+    logger.info(
+        "request.start",
+        path=str(request.url.path),
+        method=request.method,
+        client=getattr(request.client, "host", None),
+        request_id=request_id,
+    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.warning(
+            "request.error",
+            path=str(request.url.path),
+            method=request.method,
+            duration_ms=duration_ms,
+            request_id=request_id,
+            error=str(exc),
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "request.end",
+        path=str(request.url.path),
+        method=request.method,
+        status_code=response.status_code,
+        duration_ms=duration_ms,
+        request_id=request_id,
+    )
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)

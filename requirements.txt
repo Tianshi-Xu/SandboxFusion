@@ -62,11 +62,7 @@ Flask-Testing==0.8.1
 Flask-WTF==1.2.1
 xgboost==2.0.3
 gensim==4.3.2
-<<<<<<< HEAD
-matplotlib==3.8.2
-=======
 matplotlib
->>>>>>> rescue
 pandasql==0.7.3
 psutil==5.9.8
 datasketch==1.6.4
@@ -103,10 +99,6 @@ astor==0.8.1
 jupyter==1.0.0
 jupyter_client==8.6.2
 seaborn==0.13.2
-<<<<<<< HEAD
-tabulate==0.9.0
-=======
 tabulate==0.9.0
 filelock
 fsspec
->>>>>>> rescue

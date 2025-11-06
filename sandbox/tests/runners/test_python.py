@@ -46,6 +46,7 @@ def test_python_assertion_error():
     response = client.post('/run_code', json=request.model_dump())
     assert response.status_code == 200
     result = RunCodeResponse(**response.json())
+    # print(result)
     assert result.status == RunStatus.Failed
     assert result.run_result.status == CommandRunStatus.Finished
     assert 'AssertionError' in result.run_result.stderr
