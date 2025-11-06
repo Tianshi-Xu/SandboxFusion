@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+import os
 import sys
 
 import structlog
@@ -23,6 +24,9 @@ config = RunConfig.get_instance_sync()
 
 
 def configure_logging(trace_file=None):
+
+    log_level_name = os.getenv("SANDBOX_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
 
     def filter_keys(_, __, event_dict):
         event_dict.pop('_from_structlog', None)
@@ -45,7 +49,7 @@ def configure_logging(trace_file=None):
     handlers = []
 
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setLevel(logging.DEBUG)
+    stdout_handler.setLevel(log_level)
     stdout_handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             processors=[filter_keys, structlog.dev.ConsoleRenderer(colors=config.common.logging_color)],))
@@ -59,7 +63,8 @@ def configure_logging(trace_file=None):
                                                             structlog.processors.JSONRenderer()],))
         handlers.append(file_handler)
 
-    logging.basicConfig(level=logging.DEBUG, handlers=handlers)
+    logging.basicConfig(level=log_level, handlers=handlers)
+    logging.getLogger().setLevel(log_level)
     logging.getLogger('aiosqlite').setLevel(logging.CRITICAL)
     logging.getLogger('databases').setLevel(logging.CRITICAL)
     logging.getLogger("uvicorn.access").handlers = []

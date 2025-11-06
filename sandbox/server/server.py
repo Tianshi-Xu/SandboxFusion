@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from sandbox.database import get_databases
 from sandbox.server.online_judge_api import oj_router
+from sandbox.server import sandbox_api
 from sandbox.server.sandbox_api import sandbox_router
 from sandbox.utils.logging import configure_logging
 
@@ -36,9 +37,13 @@ logger = structlog.stdlib.get_logger()
 async def lifespan(app: FastAPI):
     datalake, sqlite = await get_databases()
     logger.info(f'database initialized')
-    yield
-    await datalake.disconnect()
-    await sqlite.disconnect()
+    sandbox_api.start_stats_background_task()
+    try:
+        yield
+    finally:
+        await sandbox_api.stop_stats_background_task()
+        await datalake.disconnect()
+        await sqlite.disconnect()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -56,13 +61,7 @@ app.mount('/SandboxFusion',
 async def log_request_timing(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     start = time.perf_counter()
-    logger.info(
-        "request.start",
-        path=str(request.url.path),
-        method=request.method,
-        client=getattr(request.client, "host", None),
-        request_id=request_id,
-    )
+    response = None
     try:
         response = await call_next(request)
     except Exception as exc:  # pragma: no cover - defensive logging
@@ -76,17 +75,18 @@ async def log_request_timing(request: Request, call_next):
             error=str(exc),
         )
         raise
-
-    duration_ms = (time.perf_counter() - start) * 1000
-    response.headers["X-Request-ID"] = request_id
-    logger.info(
-        "request.end",
-        path=str(request.url.path),
-        method=request.method,
-        status_code=response.status_code,
-        duration_ms=duration_ms,
-        request_id=request_id,
-    )
+    finally:
+        duration_ms = (time.perf_counter() - start) * 1000
+        if response is not None:
+            response.headers["X-Request-ID"] = request_id
+        logger.debug(
+            "request.summary",
+            path=str(request.url.path),
+            method=request.method,
+            status_code=getattr(response, "status_code", None),
+            duration_ms=duration_ms,
+            request_id=request_id,
+        )
     return response
 
 

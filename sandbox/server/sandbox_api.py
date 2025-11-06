@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import os
+import time
 import traceback
 import uuid
+from collections import Counter
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog  # type: ignore[import-not-found]
 from fastapi import APIRouter, Request
@@ -36,6 +39,138 @@ from sandbox.runners import (
 
 sandbox_router = APIRouter()
 logger = structlog.stdlib.get_logger()
+
+_STATS_LOCK: asyncio.Lock = asyncio.Lock()
+_STATUS_COUNTER: Counter[str] = Counter()
+_REASON_COUNTER: Counter[str] = Counter()
+_LAST_LOG_TS: float = 0.0
+_STATS_TASK: asyncio.Task | None = None
+_STOP_EVENT: asyncio.Event | None = None
+_LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "20"))
+_LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "60"))
+
+
+def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
+    """根据响应信息推断失败原因标签。"""
+    if resp.status == RunStatus.Success:
+        return "success"
+    if resp.status == RunStatus.SandboxError:
+        return "sandbox_error"
+
+    compile_result = resp.compile_result
+    run_result = resp.run_result
+
+    if compile_result:
+        if compile_result.status == CommandRunStatus.TimeLimitExceeded:
+            return "compile_timeout"
+        if compile_result.status == CommandRunStatus.Error:
+            return "compile_error"
+        if compile_result.return_code not in (None, 0):
+            return "compile_non_zero_exit"
+
+    if run_result:
+        if run_result.status == CommandRunStatus.TimeLimitExceeded:
+            return "run_timeout"
+        if run_result.status == CommandRunStatus.Error:
+            return "run_runtime_error"
+        if run_result.return_code not in (None, 0):
+            return "run_non_zero_exit"
+
+    return "failed_unknown"
+
+
+async def _emit_stats(force: bool = False, logger_to_use: Any | None = None) -> None:
+    """在满足条件时输出统计信息。"""
+    global _LAST_LOG_TS
+    if logger_to_use is None:
+        logger_to_use = logger
+
+    async with _STATS_LOCK:
+        total = _STATUS_COUNTER.get("total", 0)
+        if total == 0:
+            return
+
+        now = time.time()
+        by_count = _LOG_EVERY_REQUESTS > 0 and total % _LOG_EVERY_REQUESTS == 0
+        by_time = _LOG_EVERY_SECONDS > 0 and (now - _LAST_LOG_TS) >= _LOG_EVERY_SECONDS
+
+        if not force and not by_count and not by_time:
+            return
+
+        success = _STATUS_COUNTER.get("success", 0)
+        failed = _STATUS_COUNTER.get("failed", 0)
+        sandbox_error = _STATUS_COUNTER.get("sandbox_error", 0)
+        success_rate = success / total if total else 0.0
+        failure_breakdown = {
+            k: {
+                "count": v,
+                "ratio": round(v / total, 4),
+            }
+            for k, v in _REASON_COUNTER.items()
+            if k != "success"
+        }
+        logger_to_use.info(
+            "sandbox.run_code.stats",
+            total_requests=total,
+            success_count=success,
+            failed_count=failed,
+            sandbox_error_count=sandbox_error,
+            success_rate=round(success_rate, 4),
+            failure_breakdown=failure_breakdown,
+        )
+        _LAST_LOG_TS = now
+
+
+async def _record_status(status: "RunStatus", reason: str, req_logger: Any) -> None:
+    """记录请求状态并周期性输出成功率统计。"""
+    async with _STATS_LOCK:
+        _STATUS_COUNTER["total"] += 1
+        if status == RunStatus.Success:
+            status_key = "success"
+        elif status == RunStatus.Failed:
+            status_key = "failed"
+        else:
+            status_key = "sandbox_error"
+        _STATUS_COUNTER[status_key] += 1
+        _REASON_COUNTER[reason] += 1
+
+    await _emit_stats(logger_to_use=req_logger)
+
+
+async def _stats_loop(stop_event: asyncio.Event) -> None:
+    try:
+        while True:
+            await asyncio.sleep(max(_LOG_EVERY_SECONDS, 1.0))
+            if stop_event.is_set():
+                break
+            await _emit_stats(force=True)
+    except asyncio.CancelledError:  # pragma: no cover - shutdown
+        pass
+
+
+def start_stats_background_task() -> None:
+    global _STATS_TASK, _STOP_EVENT
+    if _LOG_EVERY_SECONDS <= 0:
+        return
+    if _STATS_TASK and not _STATS_TASK.done():
+        return
+    loop = asyncio.get_running_loop()
+    _STOP_EVENT = asyncio.Event()
+    _STATS_TASK = loop.create_task(_stats_loop(_STOP_EVENT))
+
+
+async def stop_stats_background_task() -> None:
+    global _STATS_TASK, _STOP_EVENT
+    if _STOP_EVENT:
+        _STOP_EVENT.set()
+    if _STATS_TASK:
+        _STATS_TASK.cancel()
+        try:
+            await _STATS_TASK
+        except asyncio.CancelledError:  # pragma: no cover - shutdown
+            pass
+    _STATS_TASK = None
+    _STOP_EVENT = None
 
 
 class RunCodeRequest(BaseModel):
@@ -108,15 +243,15 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
     req_logger = logger.bind(request_id=request_id)
     resp = RunCodeResponse(status=RunStatus.Success, message='', executor_pod_name=os.environ.get('MY_POD_NAME'))
     try:
-        req_logger.info(
-            'sandbox.run_code.start',
-            language=payload.language,
-            compile_timeout=payload.compile_timeout,
-            run_timeout=payload.run_timeout,
-            memory_limit_mb=payload.memory_limit_MB,
-            code_preview=payload.code[:120],
-            files=list(payload.files.keys()),
-        )
+        # req_logger.info(
+        #     'sandbox.run_code.start',
+        #     language=payload.language,
+        #     compile_timeout=payload.compile_timeout,
+        #     run_timeout=payload.run_timeout,
+        #     memory_limit_mb=payload.memory_limit_MB,
+        #     code_preview=payload.code[:120],
+        #     files=list(payload.files.keys()),
+        # )
         result = await CODE_RUNNERS[payload.language](CodeRunArgs(**payload.model_dump()))
 
         resp.compile_result = result.compile_result
@@ -125,25 +260,27 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
         resp.status, message = parse_run_status(result)
         if resp.status == RunStatus.SandboxError:
             resp.message = message
-        compile_status = result.compile_result.status if result.compile_result else None
-        compile_duration = result.compile_result.execution_time if result.compile_result else None
-        run_status = result.run_result.status if result.run_result else None
-        run_duration = result.run_result.execution_time if result.run_result else None
-        req_logger.info(
-            'sandbox.run_code.finish',
-            status=resp.status,
-            compile_status=compile_status,
-            compile_duration=compile_duration,
-            run_status=run_status,
-            run_duration=run_duration,
-            message=resp.message,
-        )
+        # compile_status = result.compile_result.status if result.compile_result else None
+        # compile_duration = result.compile_result.execution_time if result.compile_result else None
+        # run_status = result.run_result.status if result.run_result else None
+        # run_duration = result.run_result.execution_time if result.run_result else None
+        # req_logger.info(
+        #     'sandbox.run_code.finish',
+        #     status=resp.status,
+        #     compile_status=compile_status,
+        #     compile_duration=compile_duration,
+        #     run_status=run_status,
+        #     run_duration=run_duration,
+        #     message=resp.message,
+        # )
     except Exception as e:
         message = f'exception on running code {payload.code}: {e} {traceback.print_tb(e.__traceback__)}'
         req_logger.warning('sandbox.run_code.exception', error=str(e))
         resp.message = message
         resp.status = RunStatus.SandboxError
 
+    reason = _classify_run_code_reason(resp)
+    await _record_status(resp.status, reason, req_logger)
     return resp
 
 
