@@ -14,6 +14,7 @@
 
 import asyncio
 import os
+import re
 import time
 import traceback
 import uuid
@@ -48,6 +49,9 @@ _STATS_TASK: asyncio.Task | None = None
 _STOP_EVENT: asyncio.Event | None = None
 _LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "20"))
 _LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "60"))
+_LAST_IMPORT_FAILURE: dict[str, str] | None = None
+
+_IMPORT_ERROR_PATTERN = re.compile(r"(ModuleNotFoundError: No module named '([^']+)')|(ImportError: .+)")
 
 
 def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
@@ -63,6 +67,8 @@ def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
     if compile_result:
         if compile_result.status == CommandRunStatus.TimeLimitExceeded:
             return "compile_timeout"
+        if _IMPORT_ERROR_PATTERN.search((compile_result.stderr or "")):
+            return "import_error"
         if compile_result.status == CommandRunStatus.Error:
             return "compile_error"
         if compile_result.return_code not in (None, 0):
@@ -72,7 +78,11 @@ def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
         if run_result.status == CommandRunStatus.TimeLimitExceeded:
             return "run_timeout"
         if run_result.status == CommandRunStatus.Error:
+            if _IMPORT_ERROR_PATTERN.search((run_result.stderr or "")):
+                return "import_error"
             return "run_runtime_error"
+        if _IMPORT_ERROR_PATTERN.search((run_result.stderr or "")):
+            return "import_error"
         if run_result.return_code not in (None, 0):
             return "run_non_zero_exit"
 
@@ -117,6 +127,7 @@ async def _emit_stats(force: bool = False, logger_to_use: Any | None = None) -> 
             sandbox_error_count=sandbox_error,
             success_rate=round(success_rate, 4),
             failure_breakdown=failure_breakdown,
+            import_error_example=_LAST_IMPORT_FAILURE,
         )
         _LAST_LOG_TS = now
 
@@ -135,6 +146,42 @@ async def _record_status(status: "RunStatus", reason: str, req_logger: Any) -> N
         _REASON_COUNTER[reason] += 1
 
     await _emit_stats(logger_to_use=req_logger)
+
+
+async def _update_import_failure(example: dict[str, str]) -> None:
+    async with _STATS_LOCK:
+        global _LAST_IMPORT_FAILURE
+        _LAST_IMPORT_FAILURE = example
+
+
+def _extract_import_failure(
+    code: str,
+    language: str,
+    compile_result: Optional[CommandRunResult],
+    run_result: Optional[CommandRunResult],
+) -> Optional[dict[str, str]]:
+    def _match_error(result: Optional[CommandRunResult]) -> Optional[tuple[str, str]]:
+        if result is None:
+            return None
+        stderr = (result.stderr or "").strip()
+        match = _IMPORT_ERROR_PATTERN.search(stderr)
+        if not match:
+            return None
+        error_line = match.group(0)
+        module_name = match.group(2) or ""
+        return error_line, module_name
+
+    for candidate in (compile_result, run_result):
+        matched = _match_error(candidate)
+        if matched:
+            error_line, module_name = matched
+            return {
+                "language": language,
+                "module": module_name,
+                "error": error_line,
+                "code_preview": code[:200],
+            }
+    return None
 
 
 async def _stats_loop(stop_event: asyncio.Event) -> None:
@@ -280,6 +327,15 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
         resp.status = RunStatus.SandboxError
 
     reason = _classify_run_code_reason(resp)
+    language_value = getattr(payload.language, "value", payload.language)
+    import_failure = _extract_import_failure(
+        payload.code,
+        str(language_value),
+        resp.compile_result,
+        resp.run_result,
+    )
+    if import_failure:
+        await _update_import_failure(import_failure)
     await _record_status(resp.status, reason, req_logger)
     return resp
 

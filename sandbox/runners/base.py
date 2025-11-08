@@ -66,16 +66,22 @@ async def run_command_bare(command: str | List[str],
                                                           **(extra_env or {})
                                                       },
                                                       preexec_fn=preexec_fn)
-        if stdin is not None:
+        if stdin:
             try:
-                if p.stdin:
+                if not p.stdin:
+                    logger.warning("Attempted to write to stdin, but stdin handle is missing.")
+                elif getattr(p.stdin, "is_closing", lambda: True)():
+                    logger.warning("Attempted to write to stdin, but stdin is already closing.")
+                elif p.returncode is not None:
+                    logger.warning("Attempted to write to stdin, but process already exited.")
+                else:
                     p.stdin.write(stdin.encode())
                     if hasattr(p.stdin, "drain"):
                         await p.stdin.drain()
-                else:
-                    logger.warning("Attempted to write to stdin, but stdin is closed.")
+            except (RuntimeError, BrokenPipeError) as e:
+                logger.warning(f"Failed to write to stdin: {e}")
             except Exception as e:
-                logger.exception(f"Failed to write to stdin: {e}")
+                logger.exception(f"Unexpected failure when writing to stdin: {e}")
         if p.stdin:
             try:
                 p.stdin.close()
