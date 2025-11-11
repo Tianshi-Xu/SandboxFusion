@@ -47,11 +47,13 @@ _REASON_COUNTER: Counter[str] = Counter()
 _LAST_LOG_TS: float = 0.0
 _STATS_TASK: asyncio.Task | None = None
 _STOP_EVENT: asyncio.Event | None = None
-_LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "20"))
-_LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "60"))
+_LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "80"))
+_LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "0"))
 _LAST_IMPORT_FAILURE: dict[str, str] | None = None
+_LAST_STDIN_ISSUE: dict[str, str] | None = None
 
 _IMPORT_ERROR_PATTERN = re.compile(r"(ModuleNotFoundError: No module named '([^']+)')|(ImportError: .+)")
+_STDIN_ISSUE_PATTERN = re.compile(r"(stdin is already closing|stdin handle is missing|stdin.*already exited)")
 
 
 def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
@@ -59,6 +61,9 @@ def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
     if resp.status == RunStatus.Success:
         return "success"
     if resp.status == RunStatus.SandboxError:
+        # Check if it's a stdin issue
+        if resp.message and _STDIN_ISSUE_PATTERN.search(resp.message):
+            return "stdin_issue"
         return "sandbox_error"
 
     compile_result = resp.compile_result
@@ -69,6 +74,9 @@ def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
             return "compile_timeout"
         if _IMPORT_ERROR_PATTERN.search((compile_result.stderr or "")):
             return "import_error"
+        # Check for stdin issues in compile stderr
+        if _STDIN_ISSUE_PATTERN.search((compile_result.stderr or "")):
+            return "stdin_issue"
         if compile_result.status == CommandRunStatus.Error:
             return "compile_error"
         if compile_result.return_code not in (None, 0):
@@ -80,9 +88,15 @@ def _classify_run_code_reason(resp: "RunCodeResponse") -> str:
         if run_result.status == CommandRunStatus.Error:
             if _IMPORT_ERROR_PATTERN.search((run_result.stderr or "")):
                 return "import_error"
+            # Check for stdin issues in run stderr
+            if _STDIN_ISSUE_PATTERN.search((run_result.stderr or "")):
+                return "stdin_issue"
             return "run_runtime_error"
         if _IMPORT_ERROR_PATTERN.search((run_result.stderr or "")):
             return "import_error"
+        # Check for stdin issues in run stderr
+        if _STDIN_ISSUE_PATTERN.search((run_result.stderr or "")):
+            return "stdin_issue"
         if run_result.return_code not in (None, 0):
             return "run_non_zero_exit"
 
@@ -119,7 +133,7 @@ async def _emit_stats(force: bool = False, logger_to_use: Any | None = None) -> 
             for k, v in _REASON_COUNTER.items()
             if k != "success"
         }
-        logger_to_use.info(
+        logger_to_use.warning(
             "sandbox.run_code.stats",
             total_requests=total,
             success_count=success,
@@ -128,6 +142,7 @@ async def _emit_stats(force: bool = False, logger_to_use: Any | None = None) -> 
             success_rate=round(success_rate, 4),
             failure_breakdown=failure_breakdown,
             import_error_example=_LAST_IMPORT_FAILURE,
+            stdin_issue_example=_LAST_STDIN_ISSUE,
         )
         _LAST_LOG_TS = now
 
@@ -152,6 +167,12 @@ async def _update_import_failure(example: dict[str, str]) -> None:
     async with _STATS_LOCK:
         global _LAST_IMPORT_FAILURE
         _LAST_IMPORT_FAILURE = example
+
+
+async def _update_stdin_issue(example: dict[str, str]) -> None:
+    async with _STATS_LOCK:
+        global _LAST_STDIN_ISSUE
+        _LAST_STDIN_ISSUE = example
 
 
 def _extract_import_failure(
@@ -181,6 +202,56 @@ def _extract_import_failure(
                 "error": error_line,
                 "code_preview": code[:200],
             }
+    return None
+
+
+def _extract_stdin_issue(
+    code: str,
+    language: str,
+    stdin: Optional[str],
+    compile_result: Optional[CommandRunResult],
+    run_result: Optional[CommandRunResult],
+    sandbox_error_msg: Optional[str],
+) -> Optional[dict[str, str]]:
+    """Extract stdin issue details for debugging."""
+    def _match_error(result: Optional[CommandRunResult]) -> Optional[str]:
+        if result is None:
+            return None
+        stderr = (result.stderr or "").strip()
+        match = _STDIN_ISSUE_PATTERN.search(stderr)
+        if match:
+            return match.group(0)
+        return None
+
+    error_line = None
+    error_source = None
+    
+    # Check sandbox error message first
+    if sandbox_error_msg and _STDIN_ISSUE_PATTERN.search(sandbox_error_msg):
+        match = _STDIN_ISSUE_PATTERN.search(sandbox_error_msg)
+        if match:
+            error_line = match.group(0)
+            error_source = "sandbox_error"
+    
+    # Check compile and run results
+    if not error_line:
+        for candidate, source in [(compile_result, "compile"), (run_result, "run")]:
+            matched = _match_error(candidate)
+            if matched:
+                error_line = matched
+                error_source = source
+                break
+    
+    if error_line:
+        return {
+            "language": language,
+            "error": error_line,
+            "error_source": error_source or "unknown",
+            "code_preview": code[:200],
+            "stdin_present": stdin is not None,
+            "stdin_length": len(stdin) if stdin else 0,
+            "stdin_preview": (stdin[:100] if stdin else None),
+        }
     return None
 
 
@@ -336,6 +407,30 @@ async def run_code(payload: RunCodeRequest, http_request: Request):
     )
     if import_failure:
         await _update_import_failure(import_failure)
+    
+    # Check for stdin issues
+    stdin_issue = _extract_stdin_issue(
+        payload.code,
+        str(language_value),
+        payload.stdin,
+        resp.compile_result,
+        resp.run_result,
+        resp.message,
+    )
+    if stdin_issue:
+        await _update_stdin_issue(stdin_issue)
+        # Log detailed info for debugging
+        req_logger.warning(
+            'sandbox.run_code.stdin_issue_detected',
+            error=stdin_issue.get("error"),
+            error_source=stdin_issue.get("error_source"),
+            language=stdin_issue.get("language"),
+            code_preview=stdin_issue.get("code_preview"),
+            stdin_present=stdin_issue.get("stdin_present"),
+            stdin_length=stdin_issue.get("stdin_length"),
+            stdin_preview=stdin_issue.get("stdin_preview"),
+        )
+    
     await _record_status(resp.status, reason, req_logger)
     return resp
 
