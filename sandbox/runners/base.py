@@ -44,6 +44,31 @@ async def run_command_bare(command: str | List[str],
                            preexec_fn=None) -> CommandRunResult:
     try:
         logger.debug(f'running command {command}')
+        # if stdin:
+        #     # 提取并打印 Python 代码用于调试
+        #     import re
+        #     # 匹配 python xxx.py，支持多级目录（如 python /path/to/file.py 或 python dir/subdir/file.py）
+        #     match = re.search(r'python\d*\s+([^\s]+\.py)', str(command))
+        #     if match:
+        #         python_file = match.group(1)
+        #         logger.info(f"Python file detected: {python_file}")
+        #         logger.info(f"stdin content: {stdin[:200]}...")  # 打印前200个字符
+        #         # 如果需要读取文件内容
+        #         if cwd and os.path.exists(os.path.join(cwd, python_file)):
+        #             try:
+        #                 with open(os.path.join(cwd, python_file), 'r') as f:
+        #                     py_content = f.read()
+        #                 logger.info(f"Python file content (first 500 chars): {py_content}...")
+        #             except Exception as e:
+        #                 logger.info(f"Failed to read Python file: {e}")
+        #         elif os.path.exists(python_file):
+        #             try:
+        #                 with open(python_file, 'r') as f:
+        #                     py_content = f.read()
+        #                 logger.info(f"Python file content (first 500 chars): {py_content}...")
+        #             except Exception as e:
+        #                 logger.info(f"Failed to read Python file: {e}")
+        
         if use_exec:
             p = await asyncio.create_subprocess_exec(*command,
                                                      stdin=subprocess.PIPE,
@@ -72,6 +97,7 @@ async def run_command_bare(command: str | List[str],
                     logger.info("Attempted to write to stdin, but stdin handle is missing.")
                 elif getattr(p.stdin, "is_closing", lambda: True)():
                     logger.info("Attempted to write to stdin, but stdin is already closing.")
+                    print("p.stdout:", p.stdout)
                 elif p.returncode is not None:
                     logger.info("Attempted to write to stdin, but process already exited.")
                 else:
