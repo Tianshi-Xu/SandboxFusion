@@ -47,8 +47,8 @@ _REASON_COUNTER: Counter[str] = Counter()
 _LAST_LOG_TS: float = 0.0
 _STATS_TASK: asyncio.Task | None = None
 _STOP_EVENT: asyncio.Event | None = None
-_LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "20"))
-_LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "60"))
+_LOG_EVERY_REQUESTS: int = int(os.getenv("SANDBOX_STATS_LOG_EVERY", "200"))
+_LOG_EVERY_SECONDS: float = float(os.getenv("SANDBOX_STATS_LOG_SECONDS", "0"))
 _LAST_IMPORT_FAILURE: dict[str, str] | None = None
 
 _IMPORT_ERROR_PATTERN = re.compile(r"(ModuleNotFoundError: No module named '([^']+)')|(ImportError: .+)")
@@ -119,7 +119,7 @@ async def _emit_stats(force: bool = False, logger_to_use: Any | None = None) -> 
             for k, v in _REASON_COUNTER.items()
             if k != "success"
         }
-        logger_to_use.info(
+        logger_to_use.warn(
             "sandbox.run_code.stats",
             total_requests=total,
             success_count=success,

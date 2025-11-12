@@ -69,17 +69,17 @@ async def run_command_bare(command: str | List[str],
         if stdin:
             try:
                 if not p.stdin:
-                    logger.warning("Attempted to write to stdin, but stdin handle is missing.")
+                    logger.info("Attempted to write to stdin, but stdin handle is missing.")
                 elif getattr(p.stdin, "is_closing", lambda: True)():
-                    logger.warning("Attempted to write to stdin, but stdin is already closing.")
+                    logger.info("Attempted to write to stdin, but stdin is already closing.")
                 elif p.returncode is not None:
-                    logger.warning("Attempted to write to stdin, but process already exited.")
+                    logger.info("Attempted to write to stdin, but process already exited.")
                 else:
                     p.stdin.write(stdin.encode())
                     if hasattr(p.stdin, "drain"):
                         await p.stdin.drain()
             except (RuntimeError, BrokenPipeError) as e:
-                logger.warning(f"Failed to write to stdin: {e}")
+                logger.info(f"Failed to write to stdin: {e}")
             except Exception as e:
                 logger.exception(f"Unexpected failure when writing to stdin: {e}")
         if p.stdin:
@@ -88,7 +88,7 @@ async def run_command_bare(command: str | List[str],
                 if hasattr(p.stdin, "wait_closed"):
                     await p.stdin.wait_closed()
             except Exception as e:
-                logger.warning(f"Failed to close stdin: {e}")
+                logger.info(f"Failed to close stdin: {e}")
         start_time = time.time()
         try:
             await asyncio.wait_for(p.wait(), timeout=timeout)
