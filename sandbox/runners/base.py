@@ -81,7 +81,14 @@ async def run_command_bare(command: str | List[str],
             except (RuntimeError, BrokenPipeError) as e:
                 logger.info(f"Failed to write to stdin: {e}")
             except Exception as e:
-                logger.exception(f"Unexpected failure when writing to stdin: {e}")
+                logger.exception(
+                    f"Unexpected failure when writing to stdin: {e}",
+                    command=str(command)[:200],
+                    timeout=timeout,
+                    stdin_length=len(stdin),
+                    stdin_preview=stdin[:100] if stdin else None,
+                    error=str(e),
+                )
         if p.stdin:
             try:
                 p.stdin.close()
